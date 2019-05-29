@@ -144,14 +144,14 @@ resource "fastly_service_v1" "foo" {
     name    = "tf -test backend"
   }
 
-	gcslogging {
-	  name =  "%s"
-		email = "email@example.com",
-		bucket_name = "bucketName",
-		secret_key = "secretKey",
-		format = "log format",
-		response_condition = "",
-	}
+  gcslogging {
+    name =  "%s"
+	email = "email@example.com"
+	bucket_name = "bucketName"
+	secret_key = "secretKey"
+	format = "log format"
+	response_condition = ""
+  }
 
   force_destroy = true
 }`, name, domainName, backendName, gcsName)
@@ -175,12 +175,12 @@ resource "fastly_service_v1" "foo" {
     name    = "tf -test backend"
   }
 
-	gcslogging {
-	  name =  "%s"
-		bucket_name = "bucketName",
-		format = "log format",
-		response_condition = "",
-	}
+  gcslogging {
+	name =  "%s"
+	bucket_name = "bucketName"
+	format = "log format"
+	response_condition = ""
+  }
 
   force_destroy = true
 }`, name, domainName, backendName, gcsName)
