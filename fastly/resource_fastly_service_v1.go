@@ -1308,6 +1308,32 @@ func resourceServiceV1() *schema.Resource {
 					},
 				},
 			},
+			"dictionary": {
+				Type:     schema.TypeSet,
+				Optional: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						// Required fields
+						"name": {
+							Type:        schema.TypeString,
+							Required:    true,
+							Description: "Unique name to refer to this Dictionary",
+						},
+						// Optional fields
+						"write_only": {
+							Type:        schema.TypeBool,
+							Optional:    true,
+							Default:     false,
+							Description: "Determines if items in the dictionary are readable or not.",
+						},
+						"dictionary_id": {
+							Type:        schema.TypeString,
+							Computed:    true,
+							Description: "Generated dictionary id",
+						},
+					},
+				},
+			},
 		},
 	}
 }
@@ -1376,6 +1402,7 @@ func resourceServiceV1Update(d *schema.ResourceData, meta interface{}) error {
 		"cache_setting",
 		"snippet",
 		"vcl",
+		"dictionary",
 	} {
 		if d.HasChange(v) {
 			needsChange = true
@@ -2540,15 +2567,15 @@ func resourceServiceV1Update(d *schema.ResourceData, meta interface{}) error {
 		if d.HasChange("snippet") {
 			// Note: as above with Gzip and S3 logging, we don't utilize the PUT
 			// endpoint to update a VCL snippet, we simply destroy it and create a new one.
-			oldSnippetVal, newSnippetVal := d.GetChange("snippet")
-			if oldSnippetVal == nil {
-				oldSnippetVal = new(schema.Set)
+			oldDictVal, newSnippetVal := d.GetChange("snippet")
+			if oldDictVal == nil {
+				oldDictVal = new(schema.Set)
 			}
 			if newSnippetVal == nil {
 				newSnippetVal = new(schema.Set)
 			}
 
-			oldSnippetSet := oldSnippetVal.(*schema.Set)
+			oldSnippetSet := oldDictVal.(*schema.Set)
 			newSnippetSet := newSnippetVal.(*schema.Set)
 
 			remove := oldSnippetSet.Difference(newSnippetSet).List()
@@ -2640,6 +2667,62 @@ func resourceServiceV1Update(d *schema.ResourceData, meta interface{}) error {
 
 				log.Printf("[DEBUG] Fastly Cache Settings Addition opts: %#v", opts)
 				_, err = conn.CreateCacheSetting(opts)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		// Find differences in dictionary
+		if d.HasChange("dictionary") {
+
+			oldDictVal, newDictVal := d.GetChange("dictionary")
+
+			if oldDictVal == nil {
+				oldDictVal = new(schema.Set)
+			}
+			if newDictVal == nil {
+				newDictVal = new(schema.Set)
+			}
+
+			oldDictSet := oldDictVal.(*schema.Set)
+			newDictSet := newDictVal.(*schema.Set)
+
+			remove := oldDictSet.Difference(newDictSet).List()
+			add := newDictSet.Difference(oldDictSet).List()
+
+			// Delete removed dictionary configurations
+			for _, dRaw := range remove {
+				df := dRaw.(map[string]interface{})
+				opts := gofastly.DeleteDictionaryInput{
+					Service: d.Id(),
+					Version: latestVersion,
+					Name:    df["name"].(string),
+				}
+
+				log.Printf("[DEBUG] Fastly Dictionary Removal opts: %#v", opts)
+				err := conn.DeleteDictionary(&opts)
+				if errRes, ok := err.(*gofastly.HTTPError); ok {
+					if errRes.StatusCode != 404 {
+						return err
+					}
+				} else if err != nil {
+					return err
+				}
+			}
+
+			// POST new dictionary configurations
+			for _, dRaw := range add {
+				opts, err := buildDictionary(dRaw.(map[string]interface{}))
+				if err != nil {
+					log.Printf("[DEBUG] Error building Dicitionary: %s", err)
+					return err
+				}
+				opts.Service = d.Id()
+				opts.Version = latestVersion
+
+				log.Printf("[DEBUG] Fastly Dictionary Addition opts: %#v", opts)
+				_, err = conn.CreateDictionary(opts)
 				if err != nil {
 					return err
 				}
@@ -3064,6 +3147,22 @@ func resourceServiceV1Read(d *schema.ResourceData, meta interface{}) error {
 
 		if err := d.Set("cache_setting", csl); err != nil {
 			log.Printf("[WARN] Error setting Cache Settings for (%s): %s", d.Id(), err)
+		}
+
+		// refresh Dictionaries
+		log.Printf("[DEBUG] Refreshing Dictionaries for (%s)", d.Id())
+		dictList, err := conn.ListDictionaries(&gofastly.ListDictionariesInput{
+			Service: d.Id(),
+			Version: s.ActiveVersion.Number,
+		})
+		if err != nil {
+			return fmt.Errorf("[ERR] Error looking up Dictionaries for (%s), version (%v): %s", d.Id(), s.ActiveVersion.Number, err)
+		}
+
+		dict := flattenDictionaries(dictList)
+
+		if err := d.Set("dictionary", dict); err != nil {
+			log.Printf("[WARN] Error setting Dictionary for (%s): %s", d.Id(), err)
 		}
 
 	} else {
@@ -3853,6 +3952,39 @@ func flattenSnippets(snippetList []*gofastly.Snippet) []map[string]interface{} {
 	}
 
 	return sl
+}
+
+func buildDictionary(dictMap interface{}) (*gofastly.CreateDictionaryInput, error) {
+	df := dictMap.(map[string]interface{})
+	opts := gofastly.CreateDictionaryInput{
+		Name:      df["name"].(string),
+		WriteOnly: gofastly.CBool(df["write_only"].(bool)),
+	}
+
+	return &opts, nil
+}
+
+func flattenDictionaries(dictList []*gofastly.Dictionary) []map[string]interface{} {
+	var dl []map[string]interface{}
+	for _, currentDict := range dictList {
+		// Convert gcs to a map for saving to state.
+		dictMapString := map[string]interface{}{
+			"dictionary_id": currentDict.ID,
+			"name":          currentDict.Name,
+			"write_only":    currentDict.WriteOnly,
+		}
+
+		// prune any empty values that come from the default string value in structs
+		for k, v := range dictMapString {
+			if v == "" {
+				delete(dictMapString, k)
+			}
+		}
+
+		dl = append(dl, dictMapString)
+	}
+
+	return dl
 }
 
 func validateVCLs(d *schema.ResourceData) error {
